@@ -1,0 +1,155 @@
+---
+title: "USGS Water Site Mapping"
+format: html
+editor: visual
+---
+
+## Libraries
+
+```{r, message=FALSE}
+library(sf)
+library(shiny)
+library(glue)
+library(RColorBrewer)
+library(spatstat)    
+library(leaflet)
+library(SpatialKDE)
+library(plotly)
+library(tidyverse)
+theme_set(theme_bw())
+```
+
+## Reading in the Data
+
+```{r}
+# USGS Sites
+oh_site_data <- read_sf('oh_site_data_gdf.shp')
+oh_site_data <- oh_site_data |> sf::st_transform('+proj=longlat +datum=WGS84') 
+pa_site_data <- read_sf('pa_site_data_gdf.shp')
+pa_site_data <- pa_site_data |> sf::st_transform('+proj=longlat +datum=WGS84') 
+wv_site_data <- read_sf('wv_site_data_gdf.shp')
+wv_site_data <- wv_site_data |> sf::st_transform('+proj=longlat +datum=WGS84') 
+
+# County Level Zipcodes
+us_county <- read_sf("D:/PQHS_427_Proj_Data/US County Shapefiles/cb_2018_us_county_500k.shp")
+us_county <- us_county |> sf::st_transform('+proj=longlat +datum=WGS84')
+# Selecting OH
+oh_state <- us_county |>
+  filter(STATEFP == 39)
+pa_state <- us_county |>
+  filter(STATEFP == 42)
+wv_state <- us_county |>
+  filter(STATEFP == 54)
+
+# Waterbodies
+oh_water <- read_sf("../State Water Bodies/oh_waterbodies.shp")
+oh_water <- oh_water |> sf::st_transform('+proj=longlat +datum=WGS84') 
+pa_water <- read_sf("../State Water Bodies/pa_waterbodies.shp")
+pa_water <- pa_water |> sf::st_transform('+proj=longlat +datum=WGS84') 
+wv_water <- read_sf("../State Water Bodies/wv_waterbodies.shp")
+wv_water <- wv_water |> sf::st_transform('+proj=longlat +datum=WGS84') 
+
+# Train derailment site 
+derail_site <- st_read("../crash_zips/crash_site.shp")
+derail_site <- derail_site |> sf::st_transform('+proj=longlat +datum=WGS84')
+```
+
+```{r}
+oh_site_data <- read_sf('oh_site_data_gdf.shp')
+oh_site_data <- oh_site_data |>
+  filter(date == '2023-01-01')
+oh_site_data
+```
+
+```{r}
+oh_site_data <- oh_site_data |>
+  select(ph_max, geometry) |>
+  mutate(ph_max = as.double(ph_max))
+  
+us_states <- read_sf("D:/PQHS_427_Final_Project/Data/US state shapefiles/States_shapefile.shp")
+oh_state <- us_states |>
+  filter(State_Name == 'OHIO')
+proj_crs <- 26918  # Change to the CRS of your choice
+oh_state_proj <- st_transform(oh_state, crs = proj_crs)
+
+oh_state_sf <- st_as_sf(oh_state_proj)
+
+oh_state_sf
+```
+
+```{r}
+oh_site_data <- oh_site_data |>
+  filter(complete.cases(ph_max))
+```
+
+```{r}
+oh_grid <-create_grid_rectangular(
+  geometry = oh_state_sf,
+  cell_size = 10000,
+  only_inside = TRUE
+  )
+plot(oh_grid)
+```
+
+```{r}
+kde2 <- kde(points = oh_site_data, band_width = 20000, decay = 1, kernel = "quartic", scaled = FALSE, weights = oh_site_data$ph_max, 
+           grid = oh_grid, cell_size = 100, quiet = FALSE)
+
+```
+
+```{r}
+oh_site_data <- read_sf('oh_site_data_gdf.shp')
+oh_site_data2 <- oh_site_data |>
+  filter(date == '2023-01-05')
+oh_site_data2 <- oh_site_data2 |>
+  select(ph_max, geometry) |>
+  mutate(ph_max = as.double(ph_max))
+oh_site_data2 <- oh_site_data2 |>
+  filter(complete.cases(ph_max))
+oh_site_data2
+```
+
+```{r}
+kde5 <- kde(points = oh_site_data2, band_width = 40000, decay = 1, kernel = "quartic", scaled = FALSE, weights = oh_site_data2$ph_max, 
+           grid = oh_grid, cell_size = 100, quiet = FALSE)
+```
+
+```{r}
+plot(kde2)
+```
+
+```{r}
+plot(kde5)
+```
+
+```{r}
+oh_water
+```
+
+```{r}
+p1 <-ggplot() + 
+  geom_sf(data = oh_state, col = "white") +
+  geom_sf(data = kde2, aes(fill = kde_value)) +
+  geom_sf(data = oh_water, col = "blue") +
+  geom_sf(data = oh_site_data, col = "black") +
+  scale_fill_gradient(low = "#fee5d9", high = "#a50f15") +
+  labs(fill = "KDE Value") +
+  theme_bw()
+p1
+```
+
+```{r}
+ggplotly(p1)
+```
+
+
+```{r}
+ggplot() + 
+  geom_sf(data = oh_state, col = "white") +
+  geom_sf(data = kde5, aes(fill = kde_value)) +
+  geom_sf(data = oh_water, col = "blue") +
+  geom_sf(data = oh_site_data, col = "black") +
+  scale_fill_gradient(low = "#fee5d9", high = "#a50f15") +
+  labs(fill = "KDE Value") +
+  theme_bw()
+```

@@ -1,0 +1,38 @@
+#
+#
+# US Geological Survey
+# retrieved: 2023-03-31 14:58:27 EDT
+# URL: https://nwis.waterdata.usgs.gov/nwis/dv
+#
+# The Site File stores location and general information about groundwater,
+# surface water, and meteorological sites
+# for sites in USA.
+#
+# The following selected fields are included in this output:
+#
+#  site_no         -- Site identification number
+#  dec_lat_va      -- Decimal latitude
+#  dec_long_va     -- Decimal longitude
+#  coord_acy_cd    -- Latitude-longitude accuracy
+#  dec_coord_datum_cd -- Decimal Latitude-longitude datum
+#
+#
+# query started 2023-03-31 14:58:27 EDT
+#
+# there are 12 sites matching the search criteria.
+#
+#
+site_no	dec_lat_va	dec_long_va	coord_acy_cd	dec_coord_datum_cd
+15s	16n	16n	1s	10s
+01595800	39.44511110	-79.11080560	S	NAD83
+01608500	39.44703879	-78.65418170	U	NAD83
+01611500	39.58231580	-78.30973120	U	NAD83
+03057000	39.43508660	-80.13257890	U	NAD83
+03058000	39.00452778	-80.47336110	5	NAD83
+03061000	39.42230818	-80.27591870	U	NAD83
+03066000	39.12705240	-79.46838520	U	NAD83
+03067510	38.61705760	-79.86978490	S	NAD83
+03179000	37.54400779	-81.01036780	U	NAD83
+03183500	37.72428740	-80.64146800	F	NAD83
+03185400	37.95511285	-81.07648838	F	NAD83
+03191982	38.22676110	-81.15315560	1	NAD83
