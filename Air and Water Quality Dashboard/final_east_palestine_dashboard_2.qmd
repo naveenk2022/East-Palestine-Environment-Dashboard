@@ -1,0 +1,463 @@
+---
+title: "Mapping the Impact of the Train Derailment in East Palestine, Ohio on AQI values in Ohio, West Virginia, and Pennsylvania."
+subtitle: "Using AirNow's daily PM2.5 and Ozone data for the months of January and February, 2023, for zip codes within 30 miles of the train derailment site."
+format: 
+  html:
+    page-layout: custom
+server: shiny
+---
+
+```{r, message = FALSE}
+#| context: setup
+#| include: false
+library(sf)
+library(shiny)
+library(glue)
+library(plotly)
+library(RColorBrewer)
+library(leaflet)
+library(spatstat)
+library(patchwork)
+library(SpatialKDE)
+library(tidyverse)
+theme_set(theme_bw())
+```
+
+```{r}
+#| context: data
+#| include: false
+#| cache: true
+
+# Reading in the train derailment data
+derail_site <- st_read("../Data/crash_zips/crash_site.shp")
+derail_site <- derail_site |> sf::st_transform('+proj=longlat +datum=WGS84')
+
+# Reading in the grouped PM 2.5 and Ozone air quality data
+pm25_data <- st_read("PM2.5_grouped_by_date/pm2.5_grouped_jan.shp")
+pm25_data <- pm25_data |>
+  mutate(AQI = as.numeric(AQI))
+ozone_data <- st_read("Ozone_grouped_by_date/ozone_grouped_jan.shp")
+ozone_data <- ozone_data |>
+  mutate(AQI = as.numeric(AQI))
+
+# Getting a list of the dates under study
+date_list = unique(pm25_data$DateObserv)
+
+# Getting the maximum and minimum values of AQI for PM 2.5 and Ozone
+AQI_limits_pm <- c(min(pm25_data$AQI), max(pm25_data$AQI))
+AQI_limits_o3 <- c(min(ozone_data$AQI), max(ozone_data$AQI))
+
+# Obtaining the mean AQI for PM 2.5 and Ozone
+
+pm_mean_AQI <- mean(pm25_data$AQI)
+o3_mean_AQI <- mean(ozone_data$AQI)
+
+# Reading in the USGS water monitoring site data
+oh_site_data <- read_sf("../Data/Cleaned Water Data/oh_site_data_gdf.shp")
+pa_site_data <- read_sf('../Data/Cleaned Water Data/pa_site_data_gdf.shp')
+wv_site_data <- read_sf('../Data/Cleaned Water Data/wv_site_data_gdf.shp')
+all_site_data <- rbind(oh_site_data,pa_site_data,wv_site_data)
+
+# Reading in the US state boundary shapefile
+us_states <- read_sf("../Data/US state shapefiles/States_shapefile.shp")
+
+# Selecting the states of Ohio, Pennsylvania and West Virginia
+all_state <- us_states |>
+  filter(State_Name == 'OHIO'|State_Name == 'PENNSYLVANIA'|State_Name == 'WEST VIRGINIA')
+
+
+# Waterbodies
+oh_water <- read_sf("../Data/State Water Bodies/oh_waterbodies.shp")
+oh_water <- oh_water |> sf::st_transform('+proj=longlat +datum=WGS84') 
+pa_water <- read_sf("../Data/State Water Bodies/pa_waterbodies.shp")
+pa_water <- pa_water |> sf::st_transform('+proj=longlat +datum=WGS84') 
+wv_water <- read_sf("../Data/State Water Bodies/wv_waterbodies.shp")
+wv_water <- wv_water |> sf::st_transform('+proj=longlat +datum=WGS84') 
+
+# Reprojecting the state boundary files
+proj_crs <- 26918  # Change to the CRS of your choice
+all_state_proj <- st_transform(all_state, crs = proj_crs)
+all_state_sf <- st_as_sf(all_state_proj)
+
+
+# Creating state grids
+
+all_state_grid <-create_grid_rectangular(
+  geometry = all_state_proj,
+  cell_size = 10000,
+  only_inside = TRUE
+  )
+
+```
+
+
+```{r, warning = FALSE}
+#| panel: sidebar
+
+# Creating a date input widget and a dropdown box
+sidebarPanel(
+  p("The train derailment occurred on February 3rd, 2023."),
+  sliderInput(
+    inputId = "date",
+    label = "Select a date:",
+    min = as.Date("2023-01-01"), 
+    max = as.Date("2023-02-28"),
+    value = as.Date("2023-01-01"),
+    animate = TRUE
+  ),
+  br(),
+  selectInput(
+    inputId = "data_type",
+    label = "Select data type:",
+    choices = c("USGS Water Quality Metrics","AirNow AQI")
+  ),
+  br(),
+  conditionalPanel(
+    condition = "input.data_type == 'AirNow AQI'",
+    p("The US AQI (Air Quality Index) is the EPA's Index for reporting Air Quality. AQI is a value that ranges from 0 to 500."),
+    br(),
+    p("The Clean Air Act (the law that defines EPA’s responsibilities for protecting and improving the nation’s air quality), requires the EPA to set National Ambient Air Quality Standards (NAAQS) for six common air pollutants (also known as “Criteria Air Pollutants”)."),
+    br(),
+    p(a("AirNow", href = "https://www.airnow.gov/about-airnow/"), ("is a partnership of the U.S. Environmental Protection Agency, National Oceanic and Atmospheric Administration (NOAA), National Park Service, NASA, Centers for Disease Control, and tribal, state, and local air quality agencies. AirNow’s Historical Observation by Zip Code tool was used to obtain the daily AQI value for the zip codes within 30 miles of the train derailment, over the months of January and February, 2023.")),
+    br(),
+    p("AirNow provides the AQI for two pollutants: PM2.5 and Ozone.")
+  ),
+  conditionalPanel(
+    condition = "input.data_type == 'USGS Water Quality Metrics'",
+    p("The WQI (Water Quality Index) model is a tool that is based on aggregating a conglomerate of several water quality parameters in order to provide a single value that indicates the overall water quality of a waterbody, even in the context of spatially and temporally different datasets being used."),
+    br(),
+    selectInput(
+      inputId = "usgs_site_id",
+      label = "The following three sites are the USGS sites closest to the train derailment location.",
+      choices = c("03099500","03098600", "411402080492400"),
+      selected = "03099500"
+    ),
+    br(),
+    p("Using the USGS’s(United States Geological Survey) National Water Information System’s web interface, queries were run to return daily data for the top five of the above described metrics for the months of January and February, 2023. However, the queries returned data only on the pH and dissolved Oxygen values for the time period and States specified, with no data being present for the other metrics.")
+  )
+)
+
+```
+
+
+```{r}
+#| panel: fill
+
+mainPanel(
+  tabsetPanel(
+    id = "pills",
+    tabPanel("| AirNow PM2.5 data |",
+             leafletOutput("pm25_plot", height = 400),
+             plotOutput("pm25_chart", height = 400)),
+    tabPanel("| AirNow Ozone data |",
+             leafletOutput("ozone_plot", height = 400),
+             plotOutput("ozone_chart",height = 400)),
+    tabPanel("| USGS Dissolved Oxygen data |",
+             plotOutput("usgs_o2", width = 800, height = 600), 
+             plotOutput("usgs_o2_chart", height = 400)),
+    tabPanel("| USGS pH data |",
+             plotOutput("usgs_ph", width = 800, height = 600),
+             plotOutput("usgs_ph_chart", height = 400))
+  ),
+  p("On the 3rd of February, 2023, 51 cars of a freight train operated by Norfolk Southern derailed in East Palestine, Ohio at 8.55pm EST. Five of these cars were carrying vinyl chloride. On February 5th, the tanker cars had their contents released into a trough, which was then ignited, creating a large plume above East Palestine. Residents within a mile of the controlled burn were ordered to evacuate."),
+  br(),
+  p("Norfolk Southern reported that the hazardous chemicals on the train consisted of vinyl chloride, combustible liquids, butyl acrylate and benzene residue cars.A report from the EPA was then sent to Norfolk Southern, stating that glycol monobutyl ether, ethylhexyl acrylate and isobutylene we also found in the train cars that were derailed."),
+  br(),
+  p("The evacuation was lifted on February 9 after the EPA reported that the air inside and outside the evacuation zone had returned to normal levels. A report released by the Ohio Department of Natural Resources stated that the estimated final sample count of aquatic species killed in waterways impacted in the area totaled 2,938. ODNR also estimated the total number of other aquatic life killed as a result of the derailment, including small fish, crayfish, amphibians, and macroinvertebrates. This number is approximately 5,500. The EPA administrator Michael Regan issued an advisory to stay out of potentially contaminated streams and creeks on March 1st."),
+  br(),
+  p("Sources:"),
+  a("Patrick Orsagos, John Seewer. 2023. “Crews Release Toxic Chemicals from Derailed Tankers in Ohio.” AP News, February.",href = "https://apnews.com/article/ohio-train-derailment-updates-bf5a60de2243cd6f7f730096aa33294c"),
+  br(),
+  a("Sydney Stalnecker. 2023. “Norfolk Southern Releases List of Chemicals Carried by Derailed Train.” 21 WFMJ, February.",href ="https://www.wfmj.com/story/48313434/norfolk-southern-releases-list-of-chemicals-carried-by-derailed-train"),
+  br(),
+  a("ODNR Update on East Palestine Train Derailment Impact to Wildlife, 2023. Columbus, Ohio.", href = "https://ohiodnr.gov/discover-and-learn/safety-conservation/about-ODNR/news/Train-Derailment"),
+  br(),
+  a("Jennifer Rodriguez. 2023. “‘We Basically Nuked a Town’: 3 More Chemicals Discovered in Ohio Train Derailment.” WKBN 27, February.",href = "https://www.wkbn.com/news/local-news/east-palestine-train-derailment/3-additional-chemicals-discovered-on-east-palestine-train-derailment/"),
+  br(),
+  a("Danielle Wallace. 2023. “EPA Director Advises East Palestine Children to Stay Out of Creeks, Streams Amid Ohio Train Derailment Fallout,” March.", href = "https://www.foxnews.com/politics/epa-director-advises-east-palestine-children-stay-out-creeks-streams-ohio-train-derailment-fallout")
+  )
+
+```
+
+```{r}
+#| context: server
+#| fig-height: 8
+#| fig-width: 8
+initial_lat = 40.84
+initial_lng = -80.54
+initial_zoom = 8.5
+output$pm25_plot <- renderLeaflet({
+  pm25_polygon <- pm25_data |> 
+    filter(DateObserv == input$date)
+  pm25_polygon <- pm25_polygon |> sf::st_transform('+proj=longlat +datum=WGS84')
+  labels <- sprintf(
+  "<strong>%s</strong><br/>%s - AQI value",
+  pm25_polygon$Zipcode, pm25_polygon$AQI
+  ) %>% lapply(htmltools::HTML)
+  bins <- c(10,22,34,46,58,70,82, Inf)
+  pal <- colorBin("YlOrRd", domain = pm25_polygon$AQI, bins = bins)
+  leaflet() |>
+    setView(lat = initial_lat, lng = initial_lng, zoom = initial_zoom) |>
+    addProviderTiles(providers$CartoDB.Positron) |>
+    addPolygons(data = pm25_polygon,
+                fillColor = ~pal(pm25_polygon$AQI),
+                weight = 2,
+                opacity = 1,
+                color = "white",
+                dashArray = "3",
+                fillOpacity = 0.7,
+                highlightOptions = highlightOptions(
+                  weight = 5,
+                  color = "#666",
+                  dashArray = "",
+                  fillOpacity = 0.7,
+                  bringToFront = TRUE),
+                label = labels,
+                layerId = ~Zipcode, 
+                labelOptions = labelOptions(
+                  style = list("font-weight" = "normal", padding = "3px 8px"),
+                  textsize = "15px",
+                  direction = "auto")) |>
+    addLegend(pal = pal, values = pm25_polygon$AQI, 
+              opacity = 0.7, 
+              title = "PM2.5 AQI Values",
+              position = "bottomright") |>
+    addMarkers(data = derail_site,
+               label = "Derailment Site")
+    
+  
+
+  })
+
+
+# Define a reactiveValues object to store the clicked_zip value
+values <- reactiveValues(clicked_zip = "")
+
+# Update the clicked_zip value when a polygon is clicked
+observeEvent(input$pm25_plot_shape_click, {
+  click <- input$pm25_plot_shape_click
+  if (is.null(click))
+    return()
+  values$clicked_zip <- click$id
+})
+
+# Use the clicked_zip value in the renderPlot function
+output$pm25_chart <- renderPlot({
+  clicked_zip <- values$clicked_zip
+  pm25_polygon <- pm25_data %>% 
+    filter(Zipcode == clicked_zip)
+  # Check if pm25_polygon has any rows
+  if (nrow(pm25_polygon) == 0) {
+    return(NULL)
+  }
+  ggplot(data = pm25_polygon, aes(x = DateObserv, y = AQI,group = 1)) +
+    geom_line(color = "#00AFBB", linewidth = 0.5)  +
+    geom_point() + 
+    geom_text(aes(label = AQI), nudge_y = 1, nudge_x = 0.5) +
+    labs(title = str_wrap(glue("A Time Series Plot showing the daily PM2.5 AQI values for the months of January and February at the {clicked_zip} Zipcode.")
+                          , width = 70),
+         subtitle = "The dashed red line is the day of the train derailment. The dashed blue line is the selected date. The dashed green line is the mean AQI over the time period of study.",
+         x = "Date Observed",
+         y = "AQI Value") +
+    theme(axis.text.x = element_text(angle=45, vjust=.5, hjust=0.5)) +
+    geom_vline(xintercept =("2023-02-03"),linetype = "dashed", colour = "red") +
+    geom_vline(xintercept = (format(input$date, "%Y-%m-%d")),linetype = "dashed", colour = "blue") +
+    geom_hline(yintercept = pm_mean_AQI, linetype = "dashed", colour = "green")
+})
+
+    
+output$ozone_plot <- renderLeaflet({
+  ozone_polygon <- ozone_data |> 
+    filter(DateObserv == input$date)
+  ozone_polygon <- ozone_polygon |> sf::st_transform('+proj=longlat +datum=WGS84')
+  labels <- sprintf(
+  "<strong>%s</strong><br/>%s - AQI value<sup>2</sup>",
+  ozone_polygon$Zipcode, ozone_polygon$AQI
+  ) %>% lapply(htmltools::HTML)
+  bins <- c(14, 19, 22, 25, 28, 31, 34, 37, 40, 43, 46, Inf)
+  pal <- colorBin("YlOrRd", domain = ozone_polygon$AQI, bins = bins)
+  leaflet() |>
+    setView(lat = initial_lat, lng = initial_lng, zoom = initial_zoom) |>
+    addProviderTiles(providers$CartoDB.Positron) |>
+    addPolygons(data = ozone_polygon,
+                fillColor = ~pal(ozone_polygon$AQI),
+                weight = 2,
+                opacity = 1,
+                color = "white",
+                dashArray = "3",
+                fillOpacity = 0.7,
+                highlightOptions = highlightOptions(
+                  weight = 5,
+                  color = "#666",
+                  dashArray = "",
+                  fillOpacity = 0.7,
+                  bringToFront = TRUE),
+                label = labels,
+                layerId = ~Zipcode,
+                labelOptions = labelOptions(
+                  style = list("font-weight" = "normal", padding = "3px 8px"),
+                  textsize = "15px",
+                  direction = "auto")) |>
+    addLegend(pal = pal, values = ozone_polygon$AQI, opacity = 0.7, title = "Ozone AQI Values",
+  position = "bottomright") |>
+    addMarkers(data = derail_site,
+               label = "Derailment Site")
+    
+  
+
+  })
+
+# Define a reactiveValues object to store the clicked_zip value
+values <- reactiveValues(clicked_zip = "")
+
+# Update the clicked_zip value when a polygon is clicked
+observeEvent(input$ozone_plot_shape_click, {
+  click <- input$ozone_plot_shape_click
+  if (is.null(click))
+    return()
+  values$clicked_zip <- click$id
+})
+
+# Use the clicked_zip value in the renderPlot function
+output$ozone_chart <- renderPlot({
+  clicked_zip <- values$clicked_zip
+  ozone_polygon <- ozone_data %>% 
+    filter(Zipcode == clicked_zip)
+  ggplot(data = ozone_polygon, aes(x = DateObserv, y = AQI,group = 1)) +
+    geom_line(color = "#00AFBB", linewidth = 0.5)  +
+    geom_point() + 
+    geom_text(aes(label = AQI), nudge_y = 1, nudge_x = 0.5) +
+    labs(title = str_wrap(glue("A Time Series Plot showing the daily Ozone AQI values for the months of January and February at the {clicked_zip} Zipcode.")
+                          , width = 70),
+         subtitle = "The dashed red line is the day of the train derailment. The dashed blue line is the selected date.The dashed green line is the mean AQI over the time period of study.",
+         x = "Date Observed",
+         y = "AQI Value") +
+    theme(axis.text.x = element_text(angle=45, vjust=.5, hjust=0.5)) +
+    geom_vline(xintercept =("2023-02-03"),linetype = "dashed", colour = "red") +
+    geom_vline(xintercept = (format(input$date, "%Y-%m-%d")),linetype = "dashed", colour = "blue") +
+    geom_hline(yintercept = o3_mean_AQI, linetype = "dashed", colour = "green")
+})
+
+# Creating the USGS pH quality plots
+output$usgs_ph <- renderPlot({
+  oh_site_data <- oh_site_data |>
+    filter(date == input$date)
+  pa_site_data <- pa_site_data |>
+    filter(date == input$date)
+  wv_site_data <- wv_site_data |>
+    filter(date == input$date)
+  input_date = input$date
+  oh_site_data <- oh_site_data |>
+    select(ph_max, geometry) |>
+    mutate(ph_max = as.double(ph_max)) |>
+    filter(complete.cases(ph_max))
+  pa_site_data <- pa_site_data |>
+    select(ph_max, geometry) |>
+    mutate(ph_max = as.double(ph_max))|>
+    filter(complete.cases(ph_max))
+  wv_site_data <- wv_site_data |>
+    select(ph_max, geometry) |>
+    mutate(ph_max = as.double(ph_max))|>
+    filter(complete.cases(ph_max))
+  all_site_data <- rbind(oh_site_data, pa_site_data, wv_site_data)
+  kde_all <- kde(points = all_site_data, band_width = 70000, 
+                 decay = 1, kernel = "quartic", 
+                 scaled = FALSE, weights = all_site_data$ph_max,
+                 grid = all_state_grid, cell_size = 500, quiet = FALSE)
+  
+  ggplot() +
+    geom_sf(data = kde_all, aes(fill = kde_value)) +
+    geom_sf(data = oh_water, col = "blue") +
+    geom_sf(data = pa_water, col = "blue") +
+    geom_sf(data = wv_water, col = "blue") +
+    geom_sf(data = all_site_data, col = "black") +
+    scale_fill_gradient(low = "#fee5d9", high = "#a50f15") +
+    geom_sf(data = all_state, fill = "transparent", col = "#00441b", size = 100000) +
+    labs(title = str_wrap("Mapping the pH of Water Bodies of Ohio, Pennsylvania and West Virginia across the months of January and February, 2023.",
+                          width = 90),
+         fill = "KDE Value",
+         subtitle = "Data Obtained from USGS. ") +
+    theme_bw()
+  
+})
+
+# Creating the USGS O2 quality plots
+output$usgs_o2 <- renderPlot({
+  oh_site_data <- oh_site_data |>
+    filter(date == input$date)
+  pa_site_data <- pa_site_data |>
+    filter(date == input$date)
+  wv_site_data <- wv_site_data |>
+    filter(date == input$date)
+  input_date = input$date
+  oh_site_data <- oh_site_data |>
+    select(O2_max, geometry) |>
+    mutate(O2_max = as.double(O2_max)) |>
+    filter(complete.cases(O2_max))
+  pa_site_data <- pa_site_data |>
+    select(O2_max, geometry) |>
+    mutate(O2_max = as.double(O2_max))|>
+    filter(complete.cases(O2_max))
+  wv_site_data <- wv_site_data |>
+    select(O2_max, geometry) |>
+    mutate(O2_max = as.double(O2_max))|>
+    filter(complete.cases(O2_max))
+  all_site_data <- rbind(oh_site_data, pa_site_data, wv_site_data)
+  kde_all <- kde(points = all_site_data, band_width = 70000, 
+                 decay = 1, kernel = "quartic", 
+                 scaled = FALSE, weights = all_site_data$O2_max,
+                 grid = all_state_grid, cell_size = 500, quiet = FALSE)
+  
+  ggplot() +
+    geom_sf(data = kde_all, aes(fill = kde_value)) +
+    geom_sf(data = oh_water, col = "blue") +
+    geom_sf(data = pa_water, col = "blue") +
+    geom_sf(data = wv_water, col = "blue") +
+    geom_sf(data = all_site_data, col = "black") +
+    scale_fill_gradient(low = "#fee5d9", high = "#a50f15") +
+    geom_sf(data = all_state, fill = "transparent", col = "#00441b", size = 100000) +
+    labs(title = str_wrap("Mapping the dissolved Oxygen of Water Bodies of Ohio, Pennsylvania and West Virginia across the months of January and February, 2023.",
+                          width = 90),
+         fill = "KDE Value",
+         subtitle = "Data Obtained from USGS. ") +
+    theme_bw()
+  
+})
+
+output$usgs_o2_chart <- renderPlot({
+  input_site <- input$usgs_site_id
+  all_site_data <- all_site_data |>
+    filter(site_id == input_site)
+  ggplot(data = all_site_data, aes(x = date, y = O2_max,group = 1)) +
+    geom_line(color = "#00AFBB", linewidth = 0.5)  +
+    geom_point() + 
+    geom_text(aes(label = O2_max), nudge_y = 1, nudge_x = 0.5) +
+    labs(title = glue("A Time Series Plot showing the daily dissolved Oxygen level for the months of January and February at the {input_site} site."),
+         subtitle = "The dashed red line is the day of the train derailment. The dashed blue line is the selected date.",
+         x = "Date Observed",
+         y = "Maximum Dissolved Oxygen Level observed") +
+    theme(axis.text.x = element_text(angle=45, vjust=.5, hjust=0.5))+
+    geom_vline(xintercept =("2023-02-03"),linetype = "dashed", colour = "red") +
+    geom_vline(xintercept = (format(input$date, "%Y-%m-%d")),linetype = "dashed", colour = "blue") 
+})
+
+output$usgs_ph_chart <- renderPlot({
+  input_site <- input$usgs_site_id
+  all_site_data <- all_site_data |>
+    filter(site_id == input_site)
+  ggplot(data = all_site_data, aes(x = date, y = ph_max,group = 1)) +
+    geom_line(color = "#00AFBB", linewidth = 0.5)  +
+    geom_point() + 
+    geom_text(aes(label = ph_max), nudge_y = 1, nudge_x = 0.5) +
+    labs(title = glue("A Time Series Plot showing the daily water pH level for the months of January and February at the {input_site} site."),
+         subtitle = "The dashed red line is the day of the train derailment. The dashed blue line is the selected date.",
+         x = "Date Observed",
+         y = "Maximum water pH level observed") +
+    theme(axis.text.x = element_text(angle=45, vjust=.5, hjust=0.5))+
+    geom_vline(xintercept =("2023-02-03"),linetype = "dashed", colour = "red") +
+    geom_vline(xintercept = (format(input$date, "%Y-%m-%d")),linetype = "dashed", colour = "blue") 
+})
+
+```
+
+
